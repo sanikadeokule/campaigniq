@@ -1,8 +1,11 @@
 import io
 import os
+import re
+import hashlib
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+import chromadb
 import joblib
 import pandas as pd
 import numpy as np
@@ -70,6 +73,9 @@ async def lifespan(app: FastAPI):
     # Create DB tables on startup
     db_models.Base.metadata.create_all(bind=engine)
 
+    import sys
+    sys.modules["__main__"].RidgeClassifierWithProba = RidgeClassifierWithProba
+
     for name, filename in [
         ("revenue_model",       "best_model.pkl"),
         ("scaler",              "scaler.pkl"),
@@ -89,6 +95,130 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             print(f"[startup] WARNING: failed to load {filename}: {exc}")
             models[name] = None
+
+    # ---- Live dataset stats (ground truth for advisor) ----
+    if DATA_PATH.exists():
+        try:
+            _df = pd.read_csv(DATA_PATH)
+            _df.columns = _df.columns.str.lower()
+            _region   = _df.groupby("region")["revenue_usd"].mean().round(2).sort_values(ascending=False)
+            _channel  = _df.groupby("channel")["revenue_usd"].mean().round(2).sort_values(ascending=False)
+            _device   = _df.groupby("device_type")["revenue_usd"].mean().round(2).sort_values(ascending=False)
+            _audience = _df.groupby("audience_segment")["revenue_usd"].mean().round(2).sort_values(ascending=False)
+            models["live_stats"] = {
+                "region":        _region.to_dict(),
+                "channel":       _channel.to_dict(),
+                "device":        _device.to_dict(),
+                "audience":      _audience.to_dict(),
+                "best_region":   _region.index[0],
+                "worst_region":  _region.index[-1],
+                "best_channel":  _channel.index[0],
+                "worst_channel": _channel.index[-1],
+            }
+            print(f"[startup] Live stats loaded — best region: {_region.index[0]} (${_region.iloc[0]:,.0f}), worst: {_region.index[-1]} (${_region.iloc[-1]:,.0f})", flush=True)
+        except Exception as _e:
+            print(f"[startup] WARNING: could not compute live stats: {_e}", flush=True)
+            models["live_stats"] = {}
+    else:
+        models["live_stats"] = {}
+    # ------------------------------------------------------
+
+    # ---- Knowledge Base + ChromaDB ----
+    import json as _json
+    from openai import OpenAI as _OAI
+
+    # Build chunk list with metadata so the advisor can cite sources.
+    # Each entry: {"text": <chunk content>, "source": <origin file>}
+    kb_chunks: list[dict] = []
+
+    # 1. Markdown KB (preferred — the rich, dataset-grounded knowledge base)
+    kb_chunks += load_kb_from_markdown(BASE_DIR / "knowledge_base")
+
+    # 2. Legacy JSON sources (kept for backwards compatibility)
+    for legacy_path in [BASE_DIR / "knowledge_base_manual.json",
+                        BASE_DIR / "knowledge_base.json"]:
+        if legacy_path.exists():
+            try:
+                legacy_chunks = _json.loads(legacy_path.read_text(encoding="utf-8"))
+                if isinstance(legacy_chunks, list):
+                    for c in legacy_chunks:
+                        if isinstance(c, str):
+                            kb_chunks.append({"text": c, "source": legacy_path.name})
+                        elif isinstance(c, dict) and "text" in c:
+                            kb_chunks.append({
+                                "text": c["text"],
+                                "source": c.get("source", legacy_path.name),
+                            })
+            except Exception as _e:
+                print(f"[startup] WARNING: could not load {legacy_path.name}: {_e}", flush=True)
+
+    chroma_client = chromadb.PersistentClient(path=str(BASE_DIR / "chroma_db"))
+    collection = chroma_client.get_or_create_collection(name="campaigniq_kb")
+
+    # Detect KB drift via a stable hash of all chunk texts.
+    # If the hash changes, the collection is wiped and re-embedded.
+    current_hash = kb_content_hash(kb_chunks)
+    stored_hash = None
+    try:
+        stored_meta = collection.metadata or {}
+        stored_hash = stored_meta.get("kb_hash")
+    except Exception:
+        stored_hash = None
+
+    needs_reembed = (
+        kb_chunks
+        and (collection.count() == 0 or stored_hash != current_hash)
+    )
+
+    if needs_reembed:
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            print("[startup] WARNING: OPENAI_API_KEY not set — skipping KB embedding. /advisor will not have RAG context.", flush=True)
+        else:
+            # Wipe stale collection if KB content changed
+            if collection.count() > 0:
+                print(f"[startup] KB content changed (hash mismatch) — rebuilding index...", flush=True)
+                chroma_client.delete_collection(name="campaigniq_kb")
+                collection = chroma_client.create_collection(
+                    name="campaigniq_kb",
+                    metadata={"kb_hash": current_hash},
+                )
+            else:
+                # Set the hash on a fresh collection
+                try:
+                    collection.modify(metadata={"kb_hash": current_hash})
+                except Exception:
+                    pass
+
+            print(f"[startup] Embedding {len(kb_chunks)} KB chunks into ChromaDB...", flush=True)
+            _oai = _OAI(api_key=api_key)
+            texts = [c["text"] for c in kb_chunks]
+            sources = [c["source"] for c in kb_chunks]
+
+            # Batch embeddings to reduce API round-trips (OpenAI accepts up to 2048 inputs)
+            BATCH = 64
+            embeddings: list[list[float]] = []
+            for start in range(0, len(texts), BATCH):
+                batch = texts[start:start + BATCH]
+                resp = _oai.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=batch,
+                )
+                embeddings.extend([d.embedding for d in resp.data])
+
+            collection.add(
+                documents=texts,
+                embeddings=embeddings,
+                metadatas=[{"source": s} for s in sources],
+                ids=[f"chunk_{i}" for i in range(len(texts))],
+            )
+            print(f"[startup] Stored {len(texts)} chunks in ChromaDB (hash={current_hash[:8]})", flush=True)
+    else:
+        print(f"[startup] ChromaDB has {collection.count()} chunks, KB hash matches — skipping embed", flush=True)
+
+    models["kb_collection"] = collection
+    # ------------------------------------
+
     yield
     models.clear()
 
@@ -561,6 +691,98 @@ def fmtk(n: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Knowledge base helpers (called by lifespan + advisor)
+# ---------------------------------------------------------------------------
+def load_kb_from_markdown(kb_dir: Path) -> list[dict]:
+    """Read all *.md files under kb_dir and chunk each one on H2 (## ) headers.
+
+    Returns a list of {"text": str, "source": str} dicts. Each chunk is
+    prefixed with the document's H1 title so retrieval results carry context.
+    """
+    chunks: list[dict] = []
+    if not kb_dir.exists() or not kb_dir.is_dir():
+        return chunks
+
+    for md_file in sorted(kb_dir.glob("*.md")):
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except Exception as exc:
+            print(f"[kb] WARNING: could not read {md_file.name}: {exc}", flush=True)
+            continue
+
+        # Capture the H1 title for chunk-level context
+        h1_match = re.search(r"^#\s+(.+?)\s*$", text, re.MULTILINE)
+        doc_title = h1_match.group(1).strip() if h1_match else md_file.stem
+
+        # Split on H2 (## ) headers but preserve the header in each chunk
+        sections = re.split(r"\n## ", text)
+        for i, section in enumerate(sections):
+            section = section.strip()
+            if not section:
+                continue
+            # Re-attach the leading "## " stripped by split
+            if i > 0:
+                section = "## " + section
+            # Skip the H1-only preamble of the file (it's just the title line)
+            if section.lstrip().startswith("# ") and "\n" not in section.strip():
+                continue
+            # Prepend a context line so retrieved chunks carry their source
+            chunk_text = f"[Source: {md_file.name} — {doc_title}]\n\n{section}"
+            chunks.append({"text": chunk_text, "source": md_file.name})
+
+    return chunks
+
+
+def kb_content_hash(chunks: list[dict]) -> str:
+    """Stable hash of all chunk texts — used to invalidate ChromaDB cache."""
+    h = hashlib.sha256()
+    for c in chunks:
+        h.update(c.get("text", "").encode("utf-8"))
+        h.update(b"\x00")
+        h.update(c.get("source", "").encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def retrieve(query: str, k: int = 4) -> list[dict]:
+    """Retrieve top-k KB chunks for the given query.
+
+    Returns a list of {"text": str, "source": str, "distance": float}.
+    Returns [] if KB is unavailable or OPENAI_API_KEY is missing.
+    """
+    collection = models.get("kb_collection")
+    if collection is None or collection.count() == 0:
+        return []
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return []
+    try:
+        from openai import OpenAI
+        oai = OpenAI(api_key=api_key)
+        query_emb = oai.embeddings.create(
+            model="text-embedding-3-small", input=query
+        ).data[0].embedding
+        results = collection.query(
+            query_embeddings=[query_emb],
+            n_results=min(k, collection.count()),
+        )
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0] if results.get("metadatas") else [{}] * len(docs)
+        dists = results.get("distances", [[]])[0] if results.get("distances") else [None] * len(docs)
+        out: list[dict] = []
+        for doc, meta, dist in zip(docs, metas, dists):
+            out.append({
+                "text": doc,
+                "source": (meta or {}).get("source", "unknown"),
+                "distance": dist,
+            })
+        return out
+    except Exception as exc:
+        print(f"[retrieve] WARNING: {exc}", flush=True)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # POST /advisor
 # ---------------------------------------------------------------------------
 ADVISOR_SYSTEM_PROMPT = """You are an expert digital marketing campaign advisor with deep knowledge \
@@ -611,7 +833,57 @@ async def advisor(body: AdvisorRequest, _=Depends(auth.get_current_active_user))
     if not body.messages:
         raise HTTPException(status_code=400, detail="messages list is empty")
 
-    system = body.system_prompt.strip() if body.system_prompt.strip() else ADVISOR_SYSTEM_PROMPT
+    user_query = body.messages[-1].content
+    retrieved = retrieve(user_query, k=4)
+
+    # Build a context block that preserves source attribution
+    if retrieved:
+        context_parts = []
+        for r in retrieved:
+            context_parts.append(f"--- KB chunk from {r['source']} ---\n{r['text']}")
+        context_block = "\n\n".join(context_parts)
+    else:
+        context_block = ""
+
+    stats = models.get("live_stats", {})
+    if stats:
+        region_ranked  = "\n".join(f"  {i+1}. {r}: ${v:,.0f}" for i, (r, v) in enumerate(stats["region"].items()))
+        channel_ranked = "\n".join(f"  {i+1}. {c}: ${v:,.0f}" for i, (c, v) in enumerate(stats["channel"].items()))
+        live_block = (
+            "LIVE DATASET STATISTICS (ground truth — use these exact numbers, never guess):\n"
+            f"Revenue by region (best → worst):\n{region_ranked}\n"
+            f"→ Best: {stats['best_region']}  |  Worst: {stats['worst_region']}\n\n"
+            f"Revenue by channel (best → worst):\n{channel_ranked}\n"
+            f"→ Best: {stats['best_channel']}  |  Worst: {stats['worst_channel']}\n"
+        )
+    else:
+        live_block = ""
+
+    dynamic_system = (
+        "You are CampaignIQ Advisor — an expert digital marketing campaign analyst with access to "
+        "(a) live aggregated statistics from the 2,540-campaign dataset and (b) a curated knowledge "
+        "base covering channels, audiences, regions, devices, the BCG tier system, ML model behavior, "
+        "actionable playbooks, optimization strategies, and known model limitations.\n\n"
+        "Scope: digital marketing campaigns, campaign performance, budget strategy, "
+        "channel/region/audience analysis, ROAS, CTR, CPA, conversion rate, revenue prediction, "
+        "and the CampaignIQ platform itself. Decline only questions unrelated to marketing.\n\n"
+        "Answering rules:\n"
+        "1. ALWAYS prefer specific numbers from LIVE DATASET STATISTICS or the KNOWLEDGE BASE below "
+        "over generic claims. Examples: 'Search averages ~$32,800 per campaign' beats 'Search performs well'.\n"
+        "2. When the KB chunks contain a relevant playbook or recommendation, follow its structure.\n"
+        "3. Lead with the direct answer, then expand with detail. End with one concrete next step.\n"
+        "4. If the user asks about model accuracy or reliability, cite the actual numbers "
+        "(R²=0.887, MAE=$5,788) and surface relevant caveats from the KB.\n"
+        "5. If the KB does not cover the question, say so honestly — do not fabricate numbers.\n"
+        "6. Use plain prose. No markdown headers. No bulleted lists unless the user asks for one.\n\n"
+        + (live_block + "\n" if live_block else "")
+        + ("IMPORTANT: When asked about best/worst performers, cite the exact figures from "
+           "LIVE DATASET STATISTICS above. Do not tell the user to go analyze data themselves.\n\n"
+           if live_block else "")
+        + ("KNOWLEDGE BASE (retrieved by semantic similarity to the user's question):\n\n"
+           + context_block + "\n" if context_block else "")
+    )
+    system = body.system_prompt.strip() if body.system_prompt.strip() else dynamic_system
     openai_msgs = [{"role": "system", "content": system}]
     openai_msgs += [{"role": m.role, "content": m.content} for m in body.messages]
 
@@ -645,3 +917,71 @@ async def advisor(body: AdvisorRequest, _=Depends(auth.get_current_active_user))
     suggested = suggested[:3]
 
     return AdvisorResponse(response=text, needs_more_info=needs_more_info, suggested_questions=suggested)
+
+
+# ---------------------------------------------------------------------------
+# GET /kb-status  — debug endpoint to inspect KB indexing
+# ---------------------------------------------------------------------------
+@app.get("/kb-status")
+def kb_status():
+    """Return basic info about the loaded knowledge base. Useful to verify
+    the markdown files are correctly chunked and embedded after deployment."""
+    collection = models.get("kb_collection")
+    if collection is None:
+        return {
+            "status": "unavailable",
+            "chunk_count": 0,
+            "sources": [],
+            "note": "KB collection not initialized. Check OPENAI_API_KEY and backend/knowledge_base/ directory.",
+        }
+
+    chunk_count = collection.count()
+
+    # Pull sources from metadata for visibility
+    sources_summary: dict[str, int] = {}
+    if chunk_count > 0:
+        try:
+            sample = collection.get(limit=min(chunk_count, 500), include=["metadatas"])
+            for meta in sample.get("metadatas", []) or []:
+                src = (meta or {}).get("source", "unknown")
+                sources_summary[src] = sources_summary.get(src, 0) + 1
+        except Exception as exc:
+            sources_summary = {"_error": str(exc)}
+
+    return {
+        "status": "ok" if chunk_count > 0 else "empty",
+        "chunk_count": chunk_count,
+        "sources": sources_summary,
+        "kb_directory": str(BASE_DIR / "knowledge_base"),
+        "kb_directory_exists": (BASE_DIR / "knowledge_base").exists(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /kb-search  — debug endpoint to inspect retrieval results directly
+# ---------------------------------------------------------------------------
+class KBSearchRequest(BaseModel):
+    query: str
+    k: int = 4
+
+
+@app.post("/kb-search")
+def kb_search(body: KBSearchRequest):
+    """Return the top-K KB chunks for a query — useful for debugging RAG
+    retrieval quality without going through the full /advisor pipeline."""
+    if not body.query.strip():
+        raise HTTPException(status_code=400, detail="query is empty")
+    results = retrieve(body.query, k=body.k)
+    return {
+        "query": body.query,
+        "k": body.k,
+        "results": [
+            {
+                "source": r["source"],
+                "distance": r.get("distance"),
+                "preview": (r["text"][:300] + "...") if len(r["text"]) > 300 else r["text"],
+                "text": r["text"],
+            }
+            for r in results
+        ],
+    }

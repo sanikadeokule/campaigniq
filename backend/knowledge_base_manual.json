@@ -1,0 +1,23 @@
+[
+  "ROAS (Return on Ad Spend) = Revenue / Spend. A ROAS of 3.0x means you earned $3 for every $1 spent. The CampaignIQ dataset has a median ROAS of 3.06x. Anything above 3x is considered good performance.",
+
+  "CPC (Cost Per Click) = Spend / Clicks. Lower CPC means you are getting clicks cheaply. CPA (Cost Per Acquisition) = Spend / Conversions. Lower CPA means you are converting customers efficiently.",
+
+  "CTR (Click-Through Rate) = Clicks / Impressions x 100. A higher CTR means your ad creative is compelling. Average CTR in the dataset is around 2%.",
+
+  "Campaign tiers in CampaignIQ follow a BCG Matrix model: Star campaigns generate over $25,000 revenue — high performers to scale up. Core campaigns generate $10,000–$25,000 — stable and worth maintaining. Question Mark campaigns generate $5,000–$10,000 — potential to grow with optimization. Dog campaigns generate under $5,000 — underperforming, consider pausing or restructuring.",
+
+  "The CampaignIQ revenue predictor uses a Ridge Regression model trained on 2,540 campaigns with an R² of 0.89 (89% accuracy). Key revenue drivers are: conversion rate, ad quality score, spend, and channel selection.",
+
+  "To improve a low-performing campaign: increase ad quality score above 7, target channels with proven high ROAS (Search), focus budget on the best-performing region from the live stats (East or Central), and ensure conversion rate is above 3%.",
+
+  "CampaignIQ supports 6 channels: Search, Social, Display, Email, Video, Affiliate. Search consistently outperforms others with the highest average revenue (~$30k avg). Display has the lowest average revenue (~$6k avg). Video and Email perform similarly in the mid-range (~$25k avg).",
+
+  "Campaign objectives available: Awareness, Sales, Leads, Traffic, App Installs. Sales and Leads objectives generally yield the highest revenue because they target users with purchase intent.",
+
+  "How to use the Revenue Predictor: fill in your campaign parameters (channel, region, device, audience, spend, impressions, clicks, conversions) and the model returns a predicted revenue in USD along with a confidence range.",
+
+  "How to use Batch Predictions: upload a CSV file with your campaign data. Required columns are channel, region, device_type, audience_segment, campaign_objective, impressions, clicks, spend_usd, conversions. The system returns predictions and flags high-risk campaigns.",
+
+  "The AI Advisor can help you plan a campaign strategy. Tell it your budget, target audience, preferred channel, region, and objective — it will recommend a tier prediction, expected ROAS, and 3 actionable tips."
+]

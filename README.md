@@ -4,8 +4,6 @@
 
 CampaignIQ turns noisy digital-advertising data into revenue models, campaign health scores and plain-language explanations that a marketing team can actually act on — served through a secured API, a React dashboard and a retrieval-grounded AI advisor.
 
-![Python](https://img.shields.io/badge/Python-3.11-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green) ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.6-orange) ![React](https://img.shields.io/badge/React-18-61DAFB)
-
 ---
 
 ## The problem
@@ -23,8 +21,31 @@ A digital marketing firm runs campaigns across Search, Social, Display, Email, V
 | **AI Advisor** | RAG over a 12-document knowledge base (ChromaDB + OpenAI) that answers strategy questions — including "can I trust this prediction?" — grounded in the model's real behaviour and limitations |
 | **Dashboard** (`frontend/`) | React + Recharts: analytics, predictor, batch upload, BCG-style campaign tiers, advisor chat |
 
-<!-- Add: architecture diagram (CSV → cleaning → models → FastAPI → React / Advisor) -->
-<!-- Add: 2–3 screenshots or a short demo GIF -->
+## 🏗️ Architecture & Model Evaluation
+
+### 1. System Architecture
+
+![CampaignIQ System Architecture](docs/Marketing ML Training and Inference Pipeline.png)
+
+CampaignIQ combines an end-to-end machine learning pipeline with a React frontend and FastAPI backend. The application supports campaign revenue predictions, batch CSV scoring, model explanations using SHAP and LIME, and a RAG-powered AI advisor using ChromaDB and the OpenAI API.
+
+### 2. Model Performance Comparison
+
+![Model Comparison](docs/model_comparison_final.png)
+
+We evaluated Ridge Regression, Random Forest, and XGBoost using 5-fold cross-validation, test-set \(R^2\), and the train–test performance gap. Ridge Regression achieved the strongest test-set \(R^2\) in this comparison, while XGBoost showed a larger generalization gap.
+
+### 3. Actual vs. Predicted Revenue
+
+![Actual vs Predicted Revenue](docs/actual_vs_predicted_final.png)
+
+These plots compare actual and predicted campaign revenue using Ridge Regression, both on the log-transformed scale and the original dollar scale. The dashed red line represents perfect predictions; points closer to this line indicate better agreement between actual and predicted values.
+
+### 4. Model Explainability with SHAP
+
+![SHAP Feature Importance](docs/shap_bar_top10.png)
+
+The SHAP feature-importance plot ranks the top 10 features by mean absolute SHAP value. It provides a global view of which features most influence the Ridge Regression model's predictions, with `log_conversions` contributing the largest measured impact in this analysis.
 
 ---
 

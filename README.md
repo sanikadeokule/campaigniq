@@ -1,6 +1,6 @@
 # CampaignIQ — ML Campaign Performance Platform
 
-🏆 **Winner, BNY [event name] Hackathon (₹10,000 award)**
+🏆 **Winner, BNY DataSprint Hackathon (₹10,000 award)**
 
 CampaignIQ turns noisy digital-advertising data into revenue models, campaign health scores and plain-language explanations that a marketing team can actually act on — served through a secured API, a React dashboard and a retrieval-grounded AI advisor.
 

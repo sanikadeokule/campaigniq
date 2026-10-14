@@ -25,7 +25,7 @@ A digital marketing firm runs campaigns across Search, Social, Display, Email, V
 
 ### 1. System Architecture
 
-![CampaignIQ System Architecture](docs/Marketing ML Training and Inference Pipeline.png)
+![CampaignIQ System Architecture](docs/Marketing%20ML%20Training%20and%20Inference%20Pipeline.png)
 
 CampaignIQ combines an end-to-end machine learning pipeline with a React frontend and FastAPI backend. The application supports campaign revenue predictions, batch CSV scoring, model explanations using SHAP and LIME, and a RAG-powered AI advisor using ChromaDB and the OpenAI API.
 

@@ -144,15 +144,6 @@ Interactive docs at `http://localhost:8000/docs`.
 
 ---
 
-## Limitations
-
-- Observational data: the model shows correlation, not causation.
-- Conversions are an input, so this estimates revenue from campaign metrics; it is **not** a pre-launch forecaster.
-- No uncertainty intervals yet; typical error is roughly ± $11K (≈ 2 × MAE).
-- Random 80/20 split, as specified by the brief; a time-based split would better reflect future performance.
-
----
-
 ## Run it
 
 ```bash
